@@ -15,6 +15,10 @@ from src.calendar.google_calendar_client import list_upcoming_events
 from src.parse.rules import extract_reminder
 from src.integrations.google_calendar import create_event
 
+from PIL import Image
+from src.agent.answer_synthesis import AnswerSynthesisAgent
+from src.agent.visual_detector import VisualContentDetector
+
 router = APIRouter()
 
 
@@ -107,6 +111,31 @@ def detect_intent(text: str) -> str:
     # 기본값: RAG 질문
     return "rag"
 
+# 브라우저가 쓸 수 있는 이미지 만들기
+def _to_page_image_url(path: str | None) -> str | None:
+    if not path:
+        return None
+
+    # 윈도우 백슬래시 → 슬래시
+    norm = path.replace("\\", "/")
+
+    # 이미 http URL 이면 그대로
+    if norm.startswith("http://") or norm.startswith("https://"):
+        return norm
+
+    # data/processed/ 이후만 잘라서 사용
+    prefix = "data/processed/"
+    if norm.startswith(prefix):
+        rel = norm[len(prefix):]
+    else:
+        rel = norm  # 안전하게
+
+    # 백엔드 주소에 맞게
+    return f"http://127.0.0.1:8100/manual-pages/{rel}"
+
+answer_agent = AnswerSynthesisAgent()
+visual_detector = VisualContentDetector()
+
 # ---------- /rag/query 엔드포인트 ----------
 
 @router.post("/rag/query", response_model=RagResponse)
@@ -185,7 +214,7 @@ def rag_query(body: RagRequest) -> RagResponse:
                     text=content,
                     page=page,
                     manual_id=manual_id,
-                    page_image=page_img,
+                    page_image=_to_page_image_url(page_img),
                     score=score,
                 )
             )
@@ -194,39 +223,55 @@ def rag_query(body: RagRequest) -> RagResponse:
 
     print("[RAG] context loaded:", len(contexts))
 
-    # 3) 프롬프트 구성
-    context_strs = []
+    if not contexts:
+        # 관련 문서가 없으면 바로 응답
+        return RagResponse(
+            answer="관련 문서를 찾지 못했습니다.",
+            contexts=[],
+            intent="rag",
+        )
+
+    # 3) RAG용 텍스트 리스트 만들기
+    retrieved_sentences = []
     for c in contexts:
         prefix = f"[p.{c.page}] " if c.page is not None else ""
-        context_strs.append(prefix + c.text)
+        retrieved_sentences.append(prefix + c.text)
 
-    joined_context = (
-        "\n\n".join(context_strs)
-        if context_strs
-        else "(관련 문서를 찾지 못했습니다.)"
+    # 4) 페이지 이미지 한 장 선택 (가장 상위 컨텍스트 기준)
+    top_ctx = contexts[0]
+    page_img_path = top_ctx.page_image
+    selected_image = None
+
+    if page_img_path:
+        try:
+            img = Image.open(page_img_path).convert("RGB")
+            # 시각 자료가 실제로 있는 페이지인지 확인
+            if visual_detector.has_visual_content(img):
+                selected_image = img
+                print(f"[RAG][IMAGE] using page image: {page_img_path}")
+            else:
+                print(f"[RAG][IMAGE] no visual content detected for {page_img_path}")
+        except Exception as e:
+            print("[RAG][IMAGE] failed to open image:", repr(e))
+
+    # 5) 최종 답변 합성 (텍스트 + 선택적 이미지)
+    result = answer_agent.synthesize(
+        query=body.query,
+        retrieved_sentences=retrieved_sentences,
+        image=selected_image,
+        page=top_ctx.page or -1,
     )
 
-    prompt = (
-        "너는 가전제품 사용설명서를 대신 읽어주는 한국어 도우미야.\n"
-        "아래에 제공된 매뉴얼 내용만 근거로, 사용자가 이해하기 쉽고 안전하게 답변해 줘.\n"
-        "- 매뉴얼에 없는 내용은 추측하지 말고 '매뉴얼에 없는 내용입니다'라고 말할 것.\n"
-        "- 단계가 필요한 경우 1,2,3 순서로 정리할 것.\n\n"
-        f"질문: {body.query}\n\n"
-        f"관련 매뉴얼 발췌:\n{joined_context}\n"
-    )
-
-    print("[RAG] calling Gemini...")
-
-    try:
-        answer = _call_gemini(prompt)
-    except Exception as e:
-        print("[RAG] Gemini error:", repr(e))
-        raise HTTPException(status_code=500, detail=f"Gemini 호출 오류: {e}")
-
-    print("[RAG] Gemini done.")
+    answer = result.get("answer", "응답 생성에 실패했습니다.")
+    used_image = result.get("used_image", False)
+    print(f"[RAG] Answer synthesis done. used_image={used_image}")
     print(">>> /rag/query finished")
 
-    return RagResponse(answer=answer, contexts=contexts, intent="rag")
+    return RagResponse(
+        answer=answer,
+        contexts=contexts,
+        intent="rag",
+    )
 
 
 # ---------- /calendar/events 엔드포인트 ----------

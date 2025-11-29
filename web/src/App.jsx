@@ -2,8 +2,8 @@ import { useMemo, useState, useEffect } from 'react'
 import './App.css'
 
 // 백엔드 RAG API 엔드포인트, 캘린더 엔드포인트
-const RAG_API_URL = 'http://127.0.0.1:5500/rag/query'
-const CAL_API_URL = 'http://localhost:5500/calendar/events'
+const RAG_API_URL = 'http://127.0.0.1:8100/rag/query'
+const CAL_API_URL = 'http://localhost:8100/calendar/events'
 
 function App() {
   const formatISODate = (date) => {
@@ -58,25 +58,25 @@ function App() {
 
   const [calendarEvents, setCalendarEvents] = useState([])
 
-  // 1) 함수로 분리
-const fetchEvents = async () => {
-  try {
-    const resp = await fetch(`${CAL_API_URL}?limit=10`)
-    if (!resp.ok) {
-      throw new Error(`Calendar API error: ${resp.status}`)
+  // 캘린더 이벤트 조회 함수
+  const fetchEvents = async () => {
+    try {
+      const resp = await fetch(`${CAL_API_URL}?limit=10`)
+      if (!resp.ok) {
+        throw new Error(`Calendar API error: ${resp.status}`)
+      }
+      const data = await resp.json()
+      setCalendarEvents(data.events || [])
+    } catch (err) {
+      console.error('캘린더 이벤트 조회 실패:', err)
+      setCalendarEvents([])
     }
-    const data = await resp.json()
-    setCalendarEvents(data.events || [])
-  } catch (err) {
-    console.error('캘린더 이벤트 조회 실패:', err)
-    setCalendarEvents([])
   }
-}
 
-// 2) 마운트 시 한 번 호출
-useEffect(() => {
-  fetchEvents()
-}, [])
+  // 마운트 시 한 번 호출
+  useEffect(() => {
+    fetchEvents()
+  }, [])
 
   const handleSubmit = async (event) => {
     event.preventDefault()
@@ -114,11 +114,18 @@ useEffect(() => {
       const isReminder = intent === 'reminder'
 
       let decoratedAnswer = answerText
+      let sourceImage = null
+
       if (!isReminder && sources.length > 0) {
         const first = sources[0]
         const pageInfo = first.page ?? first.page_number
+        const pageImage = first.page_image ?? first.pageImage ?? null
+
         if (pageInfo) {
           decoratedAnswer += `\n\n(참고: p.${pageInfo} 등 매뉴얼 내용 기반)`
+        }
+        if (pageImage) {
+          sourceImage = pageImage
         }
       }
 
@@ -128,9 +135,12 @@ useEffect(() => {
         name: 'Mindual',
         content: decoratedAnswer,
         variant: isReminder ? 'reminder' : undefined,
+        sourceImage
       }
 
       setMessages((prev) => [...prev, agentMessage])
+
+      // 리마인더인 경우, 캘린더 재조회
       if (isReminder) {
         await fetchEvents()
       }
@@ -189,6 +199,7 @@ useEffect(() => {
                       <span className="source">지식 베이스 · 최신 매뉴얼</span>
                     )}
                   </div>
+
                   <p>
                     {message.content.split('\n').map((line, index) => (
                       <span key={index}>
@@ -197,6 +208,17 @@ useEffect(() => {
                       </span>
                     ))}
                   </p>
+
+                  {message.role === 'agent' && message.sourceImage && (
+                    <div className="source-image-wrapper">
+                      <p className="source-image-label">참고 페이지 이미지</p>
+                      <img
+                        src={message.sourceImage}
+                        alt="매뉴얼 페이지"
+                        className="page-image"
+                      />
+                    </div>
+                  )}
                 </div>
               </div>
             ))}
@@ -249,33 +271,6 @@ useEffect(() => {
               </li>
             </ul>
           </div>
-
-          {/*<div className="info-card">*/}
-          {/*  <h3>자동화 워크플로</h3>*/}
-          {/*  <div className="workflow">*/}
-          {/*    <div className="workflow-step">*/}
-          {/*      <span className="icon">🔍</span>*/}
-          {/*      <div>*/}
-          {/*        <p className="label">임베딩 검색</p>*/}
-          {/*        <p className="desc">질문과 유사한 문서를 Vector DB에서 조회</p>*/}
-          {/*      </div>*/}
-          {/*    </div>*/}
-          {/*    <div className="workflow-step">*/}
-          {/*      <span className="icon">🧠</span>*/}
-          {/*      <div>*/}
-          {/*        <p className="label">컨텍스트 생성</p>*/}
-          {/*        <p className="desc">관련 문단을 조합해 LLM에 전달</p>*/}
-          {/*      </div>*/}
-          {/*    </div>*/}
-          {/*    <div className="workflow-step">*/}
-          {/*      <span className="icon">✅</span>*/}
-          {/*      <div>*/}
-          {/*        <p className="label">액션 실행</p>*/}
-          {/*        <p className="desc">필요 시 리마인더, 티켓 생성 등 후속 작업 실행</p>*/}
-          {/*      </div>*/}
-          {/*    </div>*/}
-          {/*  </div>*/}
-          {/*</div>*/}
 
           <div className="info-card calendar-card">
             <div className="calendar-header">
