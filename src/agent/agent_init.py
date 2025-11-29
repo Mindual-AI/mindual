@@ -2,12 +2,16 @@
 # Gemini 기반 에이전트 초기화 및 질의 처리
 
 from typing import Dict, Any, List
+import time
 
 import google.generativeai as genai
 
 from src.config import GEMINI_API_KEY, GEMINI_MODEL_ID
 from src.agent.system_prompt import SYSTEM_PROMPT
 from src.agent.mcp_tools import search_manual, lookup_trouble, propose_next_action
+
+from src.parse.parse_text import extract_reminder
+from src.agent.calendar_client import create_reminder_event
 
 
 # ---------- Gemini 초기화 ----------
@@ -17,7 +21,39 @@ if GEMINI_API_KEY:
 
 _model = genai.GenerativeModel(GEMINI_MODEL_ID) if GEMINI_API_KEY else None
 
+def _call_gemini(prompt: str) -> str:
+    """
+    Gemini 호출 래퍼: 로그와 간단한 타임 계측만 추가
+    """
+    if _model is None:
+        # 안전장치: 모델이 없을 때는 바로 리턴
+        print("[Gemini] _model is None, skip LLM call")
+        return "LLM이 설정되어 있지 않아, 검색된 매뉴얼 내용을 그대로 참고해 주세요."
 
+    print("[Gemini] call start")
+    t0 = time.time()
+
+    # 💡 아주 거친 타임아웃: 30초 이상 걸리면 예외 던지기
+    #   SDK 자체 타임아웃이 없어서 무한 대기하면, 여기서라도 끊어주자는 느낌
+    try:
+        resp = _model.generate_content(
+            prompt,
+        )
+    except Exception as e:
+        print("[Gemini] exception:", repr(e))
+        raise
+
+    dt = time.time() - t0
+    print(f"[Gemini] call end, {dt:.2f}s")
+
+    text = getattr(resp, "text", None)
+    if not text and getattr(resp, "candidates", None):
+        try:
+            text = resp.candidates[0].content.parts[0].text
+        except Exception:
+            text = None
+
+    return text or "Gemini 응답이 비어 있습니다."
 # ---------- 헬퍼: 검색 컨텍스트 문자열 구성 ----------
 
 def _build_context(query: str, hits: List[Dict[str, Any]]) -> str:
@@ -40,6 +76,7 @@ def _build_context(query: str, hits: List[Dict[str, Any]]) -> str:
 # ---------- 메인 엔트리: answer_query ----------
 
 def answer_query(payload: Dict[str, Any]) -> Dict[str, Any]:
+    print(">>> answer_query called with:", payload, flush=True)
     """
     payload = {
       "query": "...",            # 사용자의 자연어 질문
@@ -59,6 +96,30 @@ def answer_query(payload: Dict[str, Any]) -> Dict[str, Any]:
     query = (payload.get("query") or "").strip()
     device_state = payload.get("device_state") or {}
     error_code = payload.get("error_code")
+
+    # ✅ 0) 자연어 리마인드 → Google Calendar 일정 생성
+    reminder = extract_reminder(query) if query else None
+    if reminder:
+        print("[REMINDER] create event:", reminder.summary, reminder.start, reminder.end)
+        event_id, link = create_reminder_event(
+            summary=reminder.title,
+            start=reminder.start_dt,
+        )
+
+        # 사람 눈에 자연스럽게 보이는 시간 포맷
+        pretty_time = reminder.start_dt.strftime("%m월 %d일 %p %I시").replace("AM", "오전").replace("PM", "오후")
+
+        msg = f"{pretty_time} '{reminder.title}' 일정이 Google Calendar에 추가되었습니다."
+        if link:
+            msg += f"\n(캘린더에서 보기: {link})"
+
+        return {
+            "answer": msg,
+            "proactive": None,
+            "trouble": None,
+            "used_llm": False,
+            "calendar_event_id": event_id,
+        }
 
     # 1) 능동 제안 (간단 규칙 기반)
     proactive: str | None = propose_next_action(device_state) if device_state else None

@@ -1,8 +1,9 @@
-import { useMemo, useState } from 'react'
+import { useMemo, useState, useEffect } from 'react'
 import './App.css'
 
-// 백엔드 RAG API 엔드포인트
-const RAG_API_URL = 'http://localhost:8000/rag/query'
+// 백엔드 RAG API 엔드포인트, 캘린더 엔드포인트
+const RAG_API_URL = 'http://127.0.0.1:5500/rag/query'
+const CAL_API_URL = 'http://localhost:5500/calendar/events'
 
 function App() {
   const formatISODate = (date) => {
@@ -55,18 +56,27 @@ function App() {
     }
   }, [today])
 
-  const calendarEvents = useMemo(
-    () => [
-      {
-        id: 'event-3',
-        title: '배포 캘린더 동기화 체크',
-        time: '09:00',
-        location: 'Slack huddle',
-        date: formatISODate(new Date(today.getFullYear(), today.getMonth(), 17))
-      }
-    ],
-    [today]
-  )
+  const [calendarEvents, setCalendarEvents] = useState([])
+
+  // 1) 함수로 분리
+const fetchEvents = async () => {
+  try {
+    const resp = await fetch(`${CAL_API_URL}?limit=10`)
+    if (!resp.ok) {
+      throw new Error(`Calendar API error: ${resp.status}`)
+    }
+    const data = await resp.json()
+    setCalendarEvents(data.events || [])
+  } catch (err) {
+    console.error('캘린더 이벤트 조회 실패:', err)
+    setCalendarEvents([])
+  }
+}
+
+// 2) 마운트 시 한 번 호출
+useEffect(() => {
+  fetchEvents()
+}, [])
 
   const handleSubmit = async (event) => {
     event.preventDefault()
@@ -100,9 +110,11 @@ function App() {
       const data = await resp.json()
       const answerText = data.answer ?? data.result ?? '응답을 가져오지 못했어요.'
       const sources = data.contexts ?? data.sources ?? []
+      const intent = data.intent ?? 'rag'
+      const isReminder = intent === 'reminder'
 
       let decoratedAnswer = answerText
-      if (sources.length > 0) {
+      if (!isReminder && sources.length > 0) {
         const first = sources[0]
         const pageInfo = first.page ?? first.page_number
         if (pageInfo) {
@@ -114,10 +126,14 @@ function App() {
         id: `agent-${Date.now()}`,
         role: 'agent',
         name: 'Mindual',
-        content: decoratedAnswer
+        content: decoratedAnswer,
+        variant: isReminder ? 'reminder' : undefined,
       }
 
       setMessages((prev) => [...prev, agentMessage])
+      if (isReminder) {
+        await fetchEvents()
+      }
     } catch (error) {
       console.error(error)
       const agentMessage = {
@@ -234,32 +250,32 @@ function App() {
             </ul>
           </div>
 
-          <div className="info-card">
-            <h3>자동화 워크플로</h3>
-            <div className="workflow">
-              <div className="workflow-step">
-                <span className="icon">🔍</span>
-                <div>
-                  <p className="label">임베딩 검색</p>
-                  <p className="desc">질문과 유사한 문서를 Vector DB에서 조회</p>
-                </div>
-              </div>
-              <div className="workflow-step">
-                <span className="icon">🧠</span>
-                <div>
-                  <p className="label">컨텍스트 생성</p>
-                  <p className="desc">관련 문단을 조합해 LLM에 전달</p>
-                </div>
-              </div>
-              <div className="workflow-step">
-                <span className="icon">✅</span>
-                <div>
-                  <p className="label">액션 실행</p>
-                  <p className="desc">필요 시 리마인더, 티켓 생성 등 후속 작업 실행</p>
-                </div>
-              </div>
-            </div>
-          </div>
+          {/*<div className="info-card">*/}
+          {/*  <h3>자동화 워크플로</h3>*/}
+          {/*  <div className="workflow">*/}
+          {/*    <div className="workflow-step">*/}
+          {/*      <span className="icon">🔍</span>*/}
+          {/*      <div>*/}
+          {/*        <p className="label">임베딩 검색</p>*/}
+          {/*        <p className="desc">질문과 유사한 문서를 Vector DB에서 조회</p>*/}
+          {/*      </div>*/}
+          {/*    </div>*/}
+          {/*    <div className="workflow-step">*/}
+          {/*      <span className="icon">🧠</span>*/}
+          {/*      <div>*/}
+          {/*        <p className="label">컨텍스트 생성</p>*/}
+          {/*        <p className="desc">관련 문단을 조합해 LLM에 전달</p>*/}
+          {/*      </div>*/}
+          {/*    </div>*/}
+          {/*    <div className="workflow-step">*/}
+          {/*      <span className="icon">✅</span>*/}
+          {/*      <div>*/}
+          {/*        <p className="label">액션 실행</p>*/}
+          {/*        <p className="desc">필요 시 리마인더, 티켓 생성 등 후속 작업 실행</p>*/}
+          {/*      </div>*/}
+          {/*    </div>*/}
+          {/*  </div>*/}
+          {/*</div>*/}
 
           <div className="info-card calendar-card">
             <div className="calendar-header">
